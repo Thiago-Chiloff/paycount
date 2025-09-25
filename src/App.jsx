@@ -1,8 +1,8 @@
 import { Routes, Route } from 'react-router-dom';
 import Background from './components/Background/background';
-import AddCount from './components/AddCount/AddCount';
-import FormsCount from './components/FormsCount/FormsCount';
-import ShowCount from './components/ShowCount/ShowCount';
+import AddCount from './components/AddCount/addCount';
+import FormsCount from './components/FormsCount/formsCount';
+import ShowCount from './components/ShowCount/showCount';
 import "./App.css"
 
 function App() {
