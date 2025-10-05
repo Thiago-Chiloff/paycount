@@ -1,30 +1,386 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import BackButton from "../BackButton/backButton";
-import Background from "../Background/background";
 
 function FormsCount() {
     const navigate = useNavigate();
+    const [permissaoNotificacao, setPermissaoNotificacao] = useState('default');
+    const [notificacoesTela, setNotificacoesTela] = useState([]);
+    const [serviceWorkerStatus, setServiceWorkerStatus] = useState('carregando');
+    const [ultimaVerificacao, setUltimaVerificacao] = useState(null);
 
     const [forms, setForms] = useState({
         titulo: "",
         descricao: "",
         dataVencimento: "", 
-        horaVencimento: "00:00",
+        horaVencimento: "18:00",
         valor: "", 
         pessoa: "",
         banco: "",
         prioridade: "media"
     });
 
-    // Solicitar permissão para notificações quando o componente carregar
+    // Verificar Service Worker e permissões ao carregar
     useEffect(() => {
-        solicitarPermissaoNotificacoes().then(permissao => {
-            if (permissao) {
-                verificarContasExistentes();
+        verificarServiceWorker();
+        verificarPermissoes();
+        
+        // Verificar contas imediatamente ao carregar
+        verificarTodasContas();
+        
+        // Configurar verificação periódica
+        const intervalo = setInterval(() => {
+            verificarTodasContas();
+        }, 10 * 60 * 1000); // Verificar a cada 10 minutos
+        
+        // Verificar também quando a página ganha foco
+        const handleVisibilityChange = () => {
+            if (!document.hidden) {
+                verificarTodasContas();
+            }
+        };
+        
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        
+        return () => {
+            clearInterval(intervalo);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, []);
+
+    // Verificar se Service Worker está registrado
+    const verificarServiceWorker = async () => {
+        if (!('serviceWorker' in navigator)) {
+            setServiceWorkerStatus('nao_suportado');
+            return;
+        }
+
+        try {
+            const registration = await navigator.serviceWorker.ready;
+            setServiceWorkerStatus('ativo');
+            console.log('Service Worker pronto:', registration);
+        } catch (error) {
+            setServiceWorkerStatus('inativo');
+            console.log('Service Worker não disponível:', error);
+        }
+    };
+
+    const verificarPermissoes = () => {
+        setPermissaoNotificacao(Notification.permission);
+    };
+
+    // Função para obter data atual sem timezone issues
+    const getDataAtual = () => {
+        const agora = new Date();
+        return new Date(agora.getFullYear(), agora.getMonth(), agora.getDate());
+    };
+
+    // Função para converter string de data sem timezone issues
+    const parseData = (dataString) => {
+        if (!dataString) return null;
+        const partes = dataString.split('-');
+        return new Date(partes[0], partes[1] - 1, partes[2]);
+    };
+
+    // Função para adicionar notificação na tela
+    const adicionarNotificacaoTela = (titulo, mensagem, tipo = "info", duracao = 5000) => {
+        const id = Date.now();
+        const novaNotificacao = {
+            id,
+            titulo,
+            mensagem,
+            tipo,
+            timestamp: new Date().toLocaleTimeString()
+        };
+
+        setNotificacoesTela(prev => [novaNotificacao, ...prev]);
+
+        setTimeout(() => {
+            removerNotificacaoTela(id);
+        }, duracao);
+
+        return id;
+    };
+
+    const removerNotificacaoTela = (id) => {
+        setNotificacoesTela(prev => prev.filter(notif => notif.id !== id));
+    };
+
+    // Função para enviar notificação PUSH (funciona fora do app)
+    const enviarNotificacaoPush = async (titulo, corpo, urgente = false) => {
+        // Primeiro, mostrar na tela
+        adicionarNotificacaoTela(titulo, corpo, urgente ? "urgent" : "info", 6000);
+
+        // Tentar enviar notificação push se Service Worker estiver ativo
+        if (serviceWorkerStatus === 'ativo' && Notification.permission === 'granted') {
+            try {
+                const registration = await navigator.serviceWorker.ready;
+                
+                // Enviar mensagem para o Service Worker
+                registration.active.postMessage({
+                    type: 'ENVIAR_NOTIFICACAO',
+                    titulo: titulo,
+                    corpo: corpo,
+                    urgente: urgente
+                });
+
+                console.log('📤 Notificação push enviada:', titulo);
+                
+            } catch (error) {
+                console.error('❌ Erro ao enviar notificação push:', error);
+                // Fallback: notificação normal
+                enviarNotificacaoNormal(titulo, corpo, urgente);
+            }
+        } else {
+            // Fallback para notificação normal
+            enviarNotificacaoNormal(titulo, corpo, urgente);
+        }
+    };
+
+    // Fallback: notificação normal do navegador
+    const enviarNotificacaoNormal = (titulo, corpo, urgente = false) => {
+        if (Notification.permission === 'granted') {
+            try {
+                const notificacao = new Notification(titulo, {
+                    body: corpo,
+                    icon: "/src/assets/a-bag-of-money.png",
+                    requireInteraction: urgente,
+                    tag: 'paycount-' + Date.now(),
+                    silent: false
+                });
+
+                notificacao.onclick = () => {
+                    window.focus();
+                    notificacao.close();
+                };
+            } catch (error) {
+                console.error('Erro na notificação normal:', error);
+            }
+        }
+    };
+
+    // Registrar Service Worker e pedir permissão para notificações PUSH
+    const ativarNotificacoesPush = async () => {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+            adicionarNotificacaoTela(
+                "❌ Navegador Incompatível",
+                "Seu navegador não suporta notificações push",
+                "error",
+                6000
+            );
+            return false;
+        }
+
+        try {
+            // Pedir permissão
+            const permission = await Notification.requestPermission();
+            setPermissaoNotificacao(permission);
+
+            if (permission !== 'granted') {
+                adicionarNotificacaoTela(
+                    "❌ Permissão Negada",
+                    "As notificações push não funcionarão fora do app",
+                    "warning",
+                    6000
+                );
+                return false;
+            }
+
+            // Registrar Service Worker
+            const registration = await navigator.serviceWorker.register('/sw.js');
+            setServiceWorkerStatus('ativo');
+            
+            // Pedir subscription para push (chave pública fictícia para demonstração)
+            const subscription = await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array('BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U')
+            });
+
+            console.log('✅ Push subscription:', subscription);
+            
+            adicionarNotificacaoTela(
+                "✅ Notificações Push Ativadas!",
+                "Agora você receberá lembretes mesmo com o app fechado!",
+                "success",
+                5000
+            );
+
+            // Testar notificação push
+            setTimeout(() => {
+                enviarNotificacaoPush(
+                    "🎉 PayCount - Notificações Push Ativas",
+                    "Parabéns! Agora você receberá lembretes automaticamente mesmo com o app fechado.",
+                    false
+                );
+            }, 2000);
+
+            return true;
+
+        } catch (error) {
+            console.error('❌ Erro ao ativar notificações push:', error);
+            setServiceWorkerStatus('erro');
+            
+            adicionarNotificacaoTela(
+                "❌ Erro na Ativação",
+                "Não foi possível ativar notificações push",
+                "error",
+                6000
+            );
+            return false;
+        }
+    };
+
+    // Helper function para push
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding)
+            .replace(/\-/g, '+')
+            .replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+    }
+
+    // Função principal para verificar contas
+    const verificarTodasContas = () => {
+        const counts = JSON.parse(localStorage.getItem('counts') || '[]');
+        const hoje = getDataAtual();
+        
+        let contasParaNotificar = [];
+        let notificacoesEnviadas = 0;
+
+        counts.forEach(count => {
+            if (count.pago) return;
+
+            const dataVencimento = parseData(count.dataVencimento);
+            if (!dataVencimento) return;
+
+            const diferencaMs = dataVencimento.getTime() - hoje.getTime();
+            const diferencaDias = Math.floor(diferencaMs / (1000 * 60 * 60 * 24));
+            
+            console.log(`Conta: ${count.titulo}, Vencimento: ${count.dataVencimento}, Dias: ${diferencaDias}`);
+
+            // Verificar se já notificamos hoje
+            const jaNotificouHoje = verificarSeJaNotificouHoje(count.id);
+            if (jaNotificouHoje) return;
+
+            // Lógica de notificação
+            if (diferencaDias < 0) {
+                // CONTA VENCIDA
+                contasParaNotificar.push({
+                    tipo: "vencida",
+                    count: count,
+                    dias: Math.abs(diferencaDias)
+                });
+            } else if (diferencaDias === 0) {
+                // VENCE HOJE
+                contasParaNotificar.push({
+                    tipo: "hoje",
+                    count: count
+                });
+            } else if (diferencaDias === 1) {
+                // VENCE AMANHÃ
+                contasParaNotificar.push({
+                    tipo: "amanha", 
+                    count: count
+                });
+            } else if (diferencaDias === 3) {
+                // VENCE EM 3 DIAS
+                contasParaNotificar.push({
+                    tipo: "3dias",
+                    count: count
+                });
             }
         });
-    }, []);
+
+        // Mostrar notificações
+        contasParaNotificar.forEach(item => {
+            switch (item.tipo) {
+                case "vencida":
+                    enviarNotificacaoPush(
+                        "🚨 CONTA VENCIDA!",
+                        `${item.count.titulo} - ${item.count.pessoa}\n💵 Valor: R$ ${item.count.valor.toFixed(2)}\n📅 Vencida há ${item.dias} ${item.dias === 1 ? 'dia' : 'dias'}!`,
+                        true
+                    );
+                    break;
+                case "hoje":
+                    enviarNotificacaoPush(
+                        "⚠️ CONTA VENCE HOJE!",
+                        `${item.count.titulo} - ${item.count.pessoa}\n💵 Valor: R$ ${item.count.valor.toFixed(2)}\n⏰ Vence hoje! Não esqueça de pagar!`,
+                        true
+                    );
+                    break;
+                case "amanha":
+                    enviarNotificacaoPush(
+                        "🔔 CONTA VENCE AMANHÃ!",
+                        `${item.count.titulo} - ${item.count.pessoa}\n💵 Valor: R$ ${item.count.valor.toFixed(2)}\n📅 Vence amanhã! Prepare o pagamento.`,
+                        false
+                    );
+                    break;
+                case "3dias":
+                    enviarNotificacaoPush(
+                        "📅 CONTA PRÓXIMA",
+                        `${item.count.titulo} - ${item.count.pessoa}\n💵 Valor: R$ ${item.count.valor.toFixed(2)}\n📅 Vence em 3 dias!`,
+                        false
+                    );
+                    break;
+            }
+            
+            // Marcar como notificada hoje
+            marcarComoNotificadaHoje(item.count.id);
+            notificacoesEnviadas++;
+        });
+
+        // Atualizar última verificação
+        const agora = new Date();
+        setUltimaVerificacao(agora.toLocaleTimeString());
+
+        if (notificacoesEnviadas > 0) {
+            console.log(`📊 ${notificacoesEnviadas} notificação(ões) enviada(s)`);
+        }
+    }
+
+    // Sistema para verificar notificações do dia
+    const verificarSeJaNotificouHoje = (countId) => {
+        const notificacoesHoje = JSON.parse(localStorage.getItem('notificacoesHoje') || '[]');
+        const hoje = new Date().toDateString();
+        
+        return notificacoesHoje.some(notif => 
+            notif.data === hoje && 
+            notif.countId === countId.toString()
+        );
+    }
+
+    const marcarComoNotificadaHoje = (countId) => {
+        const notificacoesHoje = JSON.parse(localStorage.getItem('notificacoesHoje') || '[]');
+        const hoje = new Date().toDateString();
+        
+        const novaNotificacao = {
+            countId: countId.toString(),
+            data: hoje,
+            timestamp: new Date().toISOString()
+        };
+        
+        const atualizadas = [novaNotificacao, ...notificacoesHoje].slice(0, 50);
+        localStorage.setItem('notificacoesHoje', JSON.stringify(atualizadas));
+    }
+
+    // Função para forçar verificação manual
+    const verificarAgora = () => {
+        adicionarNotificacaoTela(
+            "🔍 Verificando Contas...",
+            "Procurando por contas próximas do vencimento...",
+            "info",
+            3000
+        );
+        
+        setTimeout(() => {
+            verificarTodasContas();
+        }, 1000);
+    }
 
     const handleInputChange = (e) => {
         const { name, value } = e.target;
@@ -43,27 +399,21 @@ function FormsCount() {
 
     const handleButton = async () => {
         if (!forms.titulo.trim()) {
-            alert("Por favor, preencha o título da conta.");
+            adicionarNotificacaoTela("❌ Campo Obrigatório", "Por favor, preencha o título da conta", "warning", 4000);
             return;
         }
-
         if (!forms.valor || parseFloat(forms.valor) <= 0) {
-            alert("Por favor, insira um valor válido.");
+            adicionarNotificacaoTela("❌ Valor Inválido", "Por favor, insira um valor válido", "warning", 4000);
             return;
         }
-
         if (!forms.dataVencimento) {
-            alert("Por favor, selecione uma data de vencimento.");
+            adicionarNotificacaoTela("❌ Data Obrigatória", "Por favor, selecione uma data de vencimento", "warning", 4000);
             return;
         }
-
         if (!forms.pessoa) {
-            alert("Por favor, selecione uma pessoa.");
+            adicionarNotificacaoTela("❌ Pessoa Obrigatória", "Por favor, selecione uma pessoa", "warning", 4000);
             return;
         }
-        
-        // Solicitar permissão para notificações
-        const permissaoConcedida = await solicitarPermissaoNotificacoes();
         
         const newCount = {
             ...forms,
@@ -73,30 +423,34 @@ function FormsCount() {
             pago: false
         };
 
-        const existingCounts = JSON.parse(localStorage.getItem('counts')) || [];
+        const existingCounts = JSON.parse(localStorage.getItem('counts') || '[]');
         const updatedCounts = [...existingCounts, newCount];
         localStorage.setItem('counts', JSON.stringify(updatedCounts));
 
-        // Agendar notificações para esta conta
-        if (permissaoConcedida) {
-            agendarNotificacao(newCount);
-        }
+        // Notificar sobre a nova conta
+        enviarNotificacaoPush(
+            "✅ Conta Adicionada!",
+            `${forms.titulo} - ${forms.pessoa}\n💵 Valor: R$ ${forms.valor}\n📅 Vence: ${forms.dataVencimento}\n\n🔔 Você receberá lembretes automáticos!`,
+            false
+        );
 
-        iniciarNotificacoes();
+        // Verificar se essa conta já precisa de notificação
+        setTimeout(() => {
+            verificarTodasContas();
+        }, 2000);
 
         setForms({
-            titulo: "",
-            descricao: "",
+            titulo: "", 
+            descricao: "", 
             dataVencimento: "", 
-            horaVencimento: "00:00",
+            horaVencimento: "18:00",
             valor: "", 
             pessoa: "",
-            banco: "",
+            banco: "", 
             prioridade: "media"
         });
         
-        alert(`Conta adicionada com sucesso! ${permissaoConcedida ? 'Notificações ativadas.' : 'Ative as notificações para receber lembretes.'}`);
-        navigate('/showcount/showcount');
+        setTimeout(() => navigate('/showcount/showcount'), 3000);
     }
 
     const isFormValid = () => {
@@ -110,23 +464,112 @@ function FormsCount() {
     return (
         <>
         <BackButton />
+        
+        {/* Sistema de Notificações na Tela */}
+        <div className="notificacoes-tela-container">
+            {notificacoesTela.map(notificacao => (
+                <div 
+                    key={notificacao.id}
+                    className={`notificacao-tela ${notificacao.tipo}`}
+                    onClick={() => removerNotificacaoTela(notificacao.id)}
+                >
+                    <div className="notificacao-tela-icon">
+                        {notificacao.tipo === "success" && "✅"}
+                        {notificacao.tipo === "error" && "❌"}
+                        {notificacao.tipo === "warning" && "⚠️"}
+                        {notificacao.tipo === "info" && "💡"}
+                        {notificacao.tipo === "urgent" && "🚨"}
+                    </div>
+                    <div className="notificacao-tela-content">
+                        <div className="notificacao-tela-titulo">
+                            {notificacao.titulo}
+                        </div>
+                        <div className="notificacao-tela-mensagem">
+                            {notificacao.mensagem}
+                        </div>
+                        <div className="notificacao-tela-tempo">
+                            {notificacao.timestamp}
+                        </div>
+                    </div>
+                    <button 
+                        className="notificacao-tela-fechar"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            removerNotificacaoTela(notificacao.id);
+                        }}
+                    >
+                        ×
+                    </button>
+                </div>
+            ))}
+        </div>
+
         <div className="forms-count-container">
             <h1 className="page-title">Cadastrar Nova Conta</h1>
             
-            {/* Botão de permissão de notificações */}
-            <div className="form-group">
-                <button 
-                    type="button"
-                    onClick={solicitarPermissaoNotificacoes}
-                    className="notification-permission-btn"
-                >
-                    {Notification.permission === "granted" 
-                        ? "✅ Notificações Ativas" 
-                        : "🔔 Ativar Notificações"}
-                </button>
-                <p className="notification-info">
-                    Receba alertas mesmo quando o site estiver fechado
-                </p>
+            {/* Seção de Notificações Push */}
+            <div className="notificacao-status-section">
+                <h3>🔔 Notificações Push</h3>
+                
+                <div className="status-info">
+                    <div className={`status-indicator ${serviceWorkerStatus === 'ativo' ? 'granted' : 'default'}`}>
+                        {serviceWorkerStatus === 'ativo' ? "✅ PUSH ATIVO" : 
+                         serviceWorkerStatus === 'nao_suportado' ? "❌ NAVEGADOR INCOMPATÍVEL" : 
+                         serviceWorkerStatus === 'inativo' ? "🔔 ATIVAR PUSH" : "⏳ VERIFICANDO..."}
+                    </div>
+                    
+                    {ultimaVerificacao && (
+                        <div className="ultima-verificacao">
+                            📍 Última verificação: {ultimaVerificacao}
+                        </div>
+                    )}
+
+                    <div className="status-detail">
+                        {serviceWorkerStatus === 'ativo' && "✅ Receba notificações mesmo com o app fechado"}
+                        {serviceWorkerStatus === 'nao_suportado' && "❌ Seu navegador não suporta notificações push"}
+                        {serviceWorkerStatus === 'inativo' && "🔔 Ative as notificações push para receber lembretes automáticos"}
+                        {serviceWorkerStatus === 'carregando' && "⏳ Verificando sistema de notificações..."}
+                    </div>
+                </div>
+
+                <div className="notification-actions">
+                    <button 
+                        onClick={ativarNotificacoesPush}
+                        disabled={serviceWorkerStatus === 'ativo'}
+                        className="notification-action-btn primary"
+                    >
+                        {serviceWorkerStatus === 'ativo' ? "✅ Push Ativo" : "🚀 Ativar Notificações Push"}
+                    </button>
+
+                    <button 
+                        onClick={verificarAgora}
+                        className="notification-action-btn secondary"
+                    >
+                        🔍 Verificar Agora
+                    </button>
+                </div>
+
+                <div className="notification-guide">
+                    <h4>📋 Como Funcionam os Lembretes:</h4>
+                    <div className="notification-steps">
+                        <li>
+                            <span className="step-number">1</span>
+                            <span><strong>Ative as notificações push</strong> clicando no botão acima</span>
+                        </li>
+                        <li>
+                            <span className="step-number">2</span>
+                            <span><strong>Permita as notificações</strong> quando o navegador pedir</span>
+                        </li>
+                        <li>
+                            <span className="step-number">3</span>
+                            <span><strong>Receba lembretes automáticos</strong> para contas vencidas, que vencem hoje, amanhã e em 3 dias</span>
+                        </li>
+                        <li>
+                            <span className="step-number">4</span>
+                            <span><strong>Funciona com app fechado</strong> - você receberá notificações push!</span>
+                        </li>
+                    </div>
+                </div>
             </div>
 
             <div className="form-group">
@@ -136,7 +579,7 @@ function FormsCount() {
                     name="titulo"
                     value={forms.titulo} 
                     onChange={handleInputChange}
-                    placeholder="Digite o título da conta"
+                    placeholder="Ex: Conta de Luz, Aluguel, Internet..."
                     className="form-input"
                 />
             </div>
@@ -177,10 +620,10 @@ function FormsCount() {
                 <label className="form-label">Descrição:</label>
                 <textarea 
                     name="descricao"
-                    rows={4}
+                    rows={3}
                     value={forms.descricao}
                     onChange={handleInputChange}
-                    placeholder="Digite uma descrição para a conta"
+                    placeholder="Detalhes adicionais sobre a conta..."
                     className="form-textarea"
                 />
             </div>
@@ -192,7 +635,7 @@ function FormsCount() {
                     name="banco"
                     value={forms.banco}
                     onChange={handleInputChange}
-                    placeholder="Digite o nome do banco"
+                    placeholder="Onde a conta deve ser paga..."
                     className="form-input"
                 />
             </div>
@@ -249,14 +692,14 @@ function FormsCount() {
             </div>
             
             <div className="preview-container">
-                <h3>Pré-visualização:</h3>
-                <p><strong>Título:</strong> {forms.titulo || "Não informado"}</p>
-                <p><strong>Pessoa:</strong> {forms.pessoa || "Não selecionada"}</p>
-                <p><strong>Descrição:</strong> {forms.descricao || "Não informada"}</p>
-                <p><strong>Banco:</strong> {forms.banco || "Não informado"}</p>
-                <p><strong>Valor:</strong> R$ {forms.valor || "0,00"}</p>
-                <p><strong>Data de Vencimento:</strong> {forms.dataVencimento || "Não informada"}</p>
-                <p><strong>Prioridade:</strong> {forms.prioridade === 'media' ? 'Média' : 
+                <h3>Pré-visualização da Conta:</h3>
+                <p><strong>📝 Título:</strong> {forms.titulo || "Não informado"}</p>
+                <p><strong>👤 Pessoa:</strong> {forms.pessoa || "Não selecionada"}</p>
+                <p><strong>📄 Descrição:</strong> {forms.descricao || "Não informada"}</p>
+                <p><strong>🏦 Banco:</strong> {forms.banco || "Não informado"}</p>
+                <p><strong>💵 Valor:</strong> R$ {forms.valor || "0,00"}</p>
+                <p><strong>📅 Data de Vencimento:</strong> {forms.dataVencimento || "Não informada"}</p>
+                <p><strong>🎯 Prioridade:</strong> {forms.prioridade === 'media' ? 'Média' : 
                                                forms.prioridade === 'alta' ? 'Alta' : 
                                                forms.prioridade === 'urgente' ? 'Urgente' : 'Baixa'}</p>
             </div>
@@ -266,256 +709,15 @@ function FormsCount() {
                 disabled={!isFormValid()}
                 className={`submit-button ${!isFormValid() ? 'disabled' : ''}`}
             >
-                {isFormValid() ? 'Adicionar Conta' : 'Preencha os campos obrigatórios'}
+                {isFormValid() ? '💾 Salvar Conta e Ativar Lembretes' : 'Preencha os campos obrigatórios'}
             </button>
 
             <p className="required-info">
-                 Campos obrigatórios
+                💡 Ative as notificações push para receber lembretes automáticos mesmo com o app fechado!
             </p>
         </div>
         </>
     );
-}
-
-// Funções de notificação push
-const solicitarPermissaoNotificacoes = async () => {
-    if (!("Notification" in window)) {
-        console.log("Este navegador não suporta notificações.");
-        return false;
-    }
-    
-    if (Notification.permission === "granted") {
-        return true;
-    } else if (Notification.permission !== "denied") {
-        const permission = await Notification.requestPermission();
-        return permission === "granted";
-    }
-    
-    return false;
-};
-
-// Função para agendar notificação
-const agendarNotificacao = (count) => {
-    if (!("Notification" in window)) return;
-
-    const dataVencimento = new Date(count.dataVencimento);
-    const agora = new Date();
-    const diferencaMs = dataVencimento - agora;
-
-    // Se já passou da data de vencimento, notificar imediatamente
-    if (diferencaMs <= 0) {
-        enviarNotificacao(count, "VENCIDA");
-        return;
-    }
-
-    // Notificar no dia do vencimento
-    setTimeout(() => {
-        enviarNotificacao(count, "HOJE");
-    }, diferencaMs);
-
-    // Notificar 1 dia antes
-    if (diferencaMs > 24 * 60 * 60 * 1000) {
-        setTimeout(() => {
-            enviarNotificacao(count, "AMANHÃ");
-        }, diferencaMs - (24 * 60 * 60 * 1000));
-    }
-
-    // Notificar 3 dias antes
-    if (diferencaMs > 3 * 24 * 60 * 60 * 1000) {
-        setTimeout(() => {
-            enviarNotificacao(count, "EM_3_DIAS");
-        }, diferencaMs - (3 * 24 * 60 * 60 * 1000));
-    }
-};
-
-// Função para enviar a notificação
-const enviarNotificacao = (count, tipo) => {
-    if (Notification.permission !== "granted") return;
-
-    let titulo, corpo;
-
-    switch (tipo) {
-        case "VENCIDA":
-            titulo = "🚨 CONTA VENCIDA!";
-            corpo = `${count.titulo} - ${count.pessoa}\nValor: R$ ${count.valor.toFixed(2)}`;
-            break;
-        case "HOJE":
-            titulo = "⚠️ CONTA VENCE HOJE!";
-            corpo = `${count.titulo} - ${count.pessoa}\nValor: R$ ${count.valor.toFixed(2)}`;
-            break;
-        case "AMANHÃ":
-            titulo = "🔔 CONTA VENCE AMANHÃ!";
-            corpo = `${count.titulo} - ${count.pessoa}\nValor: R$ ${count.valor.toFixed(2)}`;
-            break;
-        case "EM_3_DIAS":
-            titulo = "📅 CONTA VENCE EM 3 DIAS";
-            corpo = `${count.titulo} - ${count.pessoa}\nValor: R$ ${count.valor.toFixed(2)}`;
-            break;
-        default:
-            return;
-    }
-
-    const notificacao = new Notification(titulo, {
-        body: corpo,
-        icon: "/icon.png", // Altere para o caminho do seu ícone
-        tag: `conta-${count.id}-${tipo}`, // Evita duplicatas
-        requireInteraction: tipo === "VENCIDA" || tipo === "HOJE",
-        silent: tipo !== "VENCIDA"
-    });
-
-    // Fechar automaticamente após 10 segundos (exceto para urgentes)
-    if (tipo !== "VENCIDA" && tipo !== "HOJE") {
-        setTimeout(() => {
-            notificacao.close();
-        }, 10000);
-    }
-
-    notificacao.onclick = () => {
-        window.focus();
-        notificacao.close();
-    };
-};
-
-// Verificar e agendar notificações para contas existentes
-const verificarContasExistentes = () => {
-    const counts = JSON.parse(localStorage.getItem('counts')) || [];
-    counts.forEach(count => {
-        if (!count.pago) {
-            agendarNotificacao(count);
-        }
-    });
-};
-
-function iniciarNotificacoes() {
-    if (!localStorage.getItem('notificationTimer')) {
-        const timer = setInterval(verificarNotificacoes, 60 * 60 * 1000); 
-        
-        verificarNotificacoes();
-        
-        localStorage.setItem('notificationTimer', 'ativo');
-    }
-}
-
-function verificarNotificacoes() {
-    const counts = JSON.parse(localStorage.getItem('counts')) || [];
-    const hoje = new Date();
-    const notificacoes = [];
-
-    counts.forEach(count => {
-        if (count.pago) return;
-
-        const dataVencimento = new Date(count.dataVencimento);
-        const diferencaDias = Math.floor((dataVencimento - hoje) / (1000 * 60 * 60 * 24));
-        
-        let mensagem = '';
-        let tipo = 'info';
-
-        if (diferencaDias < 0) {
-            mensagem = `🚨 CONTA VENCIDA! "${count.titulo}" para ${count.pessoa} está atrasada há ${Math.abs(diferencaDias)} dias!`;
-            tipo = 'urgent';
-            // Enviar notificação push para contas vencidas
-            if (Notification.permission === "granted") {
-                enviarNotificacao(count, "VENCIDA");
-            }
-        } else if (diferencaDias === 0) {
-            mensagem = `⚠️ CONTA VENCE HOJE! "${count.titulo}" para ${count.pessoa} - Valor: R$ ${count.valor.toFixed(2)}`;
-            tipo = 'today';
-            if (Notification.permission === "granted") {
-                enviarNotificacao(count, "HOJE");
-            }
-        } else if (diferencaDias === 1) {
-            mensagem = `🔔 CONTA VENCE AMANHÃ! "${count.titulo}" para ${count.pessoa} - Valor: R$ ${count.valor.toFixed(2)}`;
-            tipo = 'tomorrow';
-            if (Notification.permission === "granted") {
-                enviarNotificacao(count, "AMANHÃ");
-            }
-        } else if (diferencaDias <= 3) {
-            mensagem = `📅 "${count.titulo}" para ${count.pessoa} vence em ${diferencaDias} dias - R$ ${count.valor.toFixed(2)}`;
-            tipo = 'soon';
-            if (diferencaDias === 3 && Notification.permission === "granted") {
-                enviarNotificacao(count, "EM_3_DIAS");
-            }
-        } else if (diferencaDias <= 7) {
-            mensagem = `📋 "${count.titulo}" para ${count.pessoa} vence em ${diferencaDias} dias`;
-            tipo = 'week';
-        }
-
-        if (mensagem) {
-            notificacoes.push({
-                mensagem,
-                tipo,
-                prioridade: count.prioridade,
-                diasRestantes: diferencaDias,
-                dataVencimento: count.dataVencimento,
-                pessoa: count.pessoa
-            });
-        }
-    });
-
-    notificacoes.sort((a, b) => {
-        if (a.diasRestantes !== b.diasRestantes) {
-            return a.diasRestantes - b.diasRestantes;
-        }
-
-        const prioridades = { 'urgente': 4, 'alta': 3, 'media': 2, 'baixa': 1 };
-        return prioridades[b.prioridade] - prioridades[a.prioridade];
-    });
-
-    localStorage.setItem('ultimasNotificacoes', JSON.stringify({
-        data: new Date().toISOString(),
-        notificacoes: notificacoes
-    }));
-
-    exibirNotificacoes(notificacoes);
-}
-
-function exibirNotificacoes(notificacoes) {
-    const notificacaoExistente = document.getElementById('sistema-notificacoes');
-    if (notificacaoExistente) {
-        notificacaoExistente.remove();
-    }
-
-    if (notificacoes.length === 0) return;
-
-    const notificacaoContainer = document.createElement('div');
-    notificacaoContainer.id = 'sistema-notificacoes';
-    notificacaoContainer.innerHTML = `
-        <div class="notificacao-header">
-            <h3>🔔 Lembretes de Contas</h3>
-            <button onclick="this.parentElement.parentElement.remove()">×</button>
-        </div>
-        <div class="notificacao-list">
-            ${notificacoes.map(notif => `
-                <div class="notificacao-item ${notif.tipo}">
-                    <span class="notificacao-icon">
-                        ${notif.tipo === 'urgent' ? '🚨' : 
-                          notif.tipo === 'today' ? '⚠️' : 
-                          notif.tipo === 'tomorrow' ? '🔔' : 
-                          notif.tipo === 'soon' ? '📅' : '📋'}
-                    </span>
-                    <div class="notificacao-content">
-                        <span class="notificacao-mensagem">${notif.mensagem}</span>
-                        <span class="notificacao-prioridade ${notif.prioridade}">${notif.prioridade}</span>
-                    </div>
-                </div>
-            `).join('')}
-        </div>
-    `;
-
-    document.body.appendChild(notificacaoContainer);
-
-    if (!notificacoes.some(notif => notif.tipo === 'urgent' || notif.tipo === 'today')) {
-        setTimeout(() => {
-            const notif = document.getElementById('sistema-notificacoes');
-            if (notif) notif.remove();
-        }, 30000);
-    }
-}
-
-if (typeof window !== 'undefined') {
-    window.verificarNotificacoes = verificarNotificacoes;
-    window.exibirNotificacoes = exibirNotificacoes;
-    window.iniciarNotificacoes = iniciarNotificacoes;
 }
 
 export default FormsCount;

@@ -1,0 +1,24 @@
+{
+  "name": "PayCount - Gerenciador de Contas",
+  "short_name": "PayCount",
+  "description": "Sistema de gerenciamento e lembretes de contas para sua família",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#4CAF50",
+  "background_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/src/assets/a-bag-of-money.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/src/assets/a-bag-of-money.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "productivity", "utilities"]
+}
